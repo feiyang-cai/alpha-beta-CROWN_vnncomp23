@@ -1,0 +1,28 @@
+general:
+  conv_mode: matrix
+model:
+  name: Customized("../../models/nonlinear_NNs/models/vit.py", "ViT")
+  path: models/nonlinear_NNs/pretrained/vit.pth
+data:
+  dataset: MNIST
+  end: 35
+specification:
+  epsilon: 0.01
+solver:
+  batch_size: 56
+  alpha-crown:
+    lr_decay: 0.999
+    iteration: 200
+  beta-crown:
+    lr_alpha: 0.005
+    lr_beta: 0.025
+    iteration: 10
+bab:
+  timeout: 800
+  pruning_in_iteration: False
+  branching:
+    method: nonlinear
+    candidates: 3
+    nonlinear_split:
+      num_branches: 3
+      method: babsr_like

@@ -1,0 +1,27 @@
+general:
+  root_path: ../../vnncomp2021/benchmarks/eran  # Please update this path to point to the VNN-COMP 2021 repo
+  csv_name: eran_instances.csv
+  loss_reduction_func: min
+  sparse_alpha: false
+data:
+  start: 47
+solver:
+  batch_size: 512
+  alpha-crown:
+    lr_decay: 0.999
+    iteration: 200
+  beta-crown:
+    lr_alpha: 0.5
+    lr_beta: 0.1
+    iteration: 10
+attack:
+  pgd_order: skip
+bab:
+  pruning_in_iteration: false   # bug
+  branching:
+    method: nonlinear
+    candidates: 1
+    nonlinear_split:
+      num_branches: 3
+      method: shortcut
+      batch_size: 51200

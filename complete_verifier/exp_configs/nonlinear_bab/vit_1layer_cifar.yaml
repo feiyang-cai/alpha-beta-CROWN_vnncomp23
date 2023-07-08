@@ -1,0 +1,30 @@
+general:
+  conv_mode: matrix
+model:
+  name: Customized("../../models/nonlinear_NNs/models/vit.py", "ViT_1layer_cifar")
+  path: checkpoints/0421/vit_1_cifar/ckpt_best
+data:
+  dataset: CIFAR
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.2023, 0.1994, 0.2010]
+  end: 10000
+specification:
+  epsilon: 0.007843137255
+solver:
+  batch_size: 32
+  alpha-crown:
+    lr_decay: 0.999
+    iteration: 200
+  beta-crown:
+    lr_alpha: 0.005
+    lr_beta: 0.025
+    iteration: 10
+bab:
+  timeout: 1500
+  pruning_in_iteration: False
+  branching:
+    method: nonlinear
+    candidates: 3
+    nonlinear_split:
+      num_branches: 3
+      method: babsr_like

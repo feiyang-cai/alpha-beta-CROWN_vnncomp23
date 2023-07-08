@@ -1,0 +1,39 @@
+model:
+  name: Customized("../../models/control/neural_lyapunov_control.py", "InvertedPendulum")
+  path: models/control/inverted_pendulum.pth
+general:
+  enable_incomplete_verification: false
+  conv_mode: matrix
+data:
+  dataset: Customized("../../models/control/neural_lyapunov_control.py", "inverted_pendulum_data")
+  num_outputs: 2
+specification:
+  robustness_type: all-positive
+  type: lp
+  epsilon: 5.0
+attack:  # Currently attack is only implemented for Linf norm.
+  pgd_order: before
+  pgd_steps: 100  # Increase for a stronger attack. A PGD attack will be used before verification to filter on non-robust data examples.
+  pgd_restarts: 30  # Increase for a stronger attack.
+solver:
+  batch_size: 32768
+  min_batch_size_ratio: 0.
+  bound_prop_method: crown
+  alpha-crown:
+    lr_decay: 0.999
+    iteration: 200
+  beta-crown:
+    lr_alpha: 0.5
+    lr_beta: 0.1
+    iteration: 50
+bab:
+  pruning_in_iteration: false   # bug
+  branching:
+    method: nonlinear
+    candidates: 1
+    sort_domain_interval: 1
+    new_input_split:
+      enable: true
+      batch_size: 32768
+      rounds: 100
+  timeout: 120  # Timeout threshold for branch and bound. Increase for verifying more points.
