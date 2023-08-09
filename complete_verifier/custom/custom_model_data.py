@@ -25,6 +25,7 @@ from torch import nn
 from torchvision import transforms
 from torchvision import datasets
 import arguments
+import torch.nn.functional as F
 
 
 def simple_conv_model(in_channel, out_dim):
@@ -140,3 +141,173 @@ def simple_cifar10(spec):
     # Rescale epsilon.
     ret_eps = torch.reshape(eps / std, (1, -1, 1, 1))
     return X, labels, data_max, data_min, ret_eps
+
+class Generator(nn.Module):
+    def __init__(self, n_noise=4, n_conditions=1, n_channels=1, image_size=32):
+        super(Generator, self).__init__()
+
+        self.init_size = image_size // 2 ** 4
+        self.l1 = nn.Sequential(nn.Linear(n_noise+n_conditions, 128 * self.init_size ** 2))
+
+        self.conv_blocks = nn.Sequential(
+            nn.BatchNorm2d(128),
+            nn.ConvTranspose2d(128, 128, 4, 2, 0),
+
+            nn.BatchNorm2d(128, 0.8),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(128, 64, 4, 2, 0),
+
+            nn.BatchNorm2d(64, 0.8),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(64, 32, 4, 2, 0),
+
+            nn.BatchNorm2d(32, 0.8),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(32, n_channels, 3, 1, 0),
+            #nn.Tanh(),
+        )
+
+    def forward(self, x):
+        # x [c, z]
+        out = self.l1(x)
+        #out = self.l1(torch.cat([c,z], dim=1))
+        out = out.view(-1, 128, self.init_size, self.init_size)
+        img = self.conv_blocks(out)
+        return img
+
+class Discriminator(nn.Module):
+    def __init__(self, n_conditions=1, n_channels=1, image_size=32):
+        super(Discriminator, self).__init__()
+
+        def discriminator_block(in_filters, out_filters, bn=True):
+            """Returns layers of each discriminator block"""
+            #block = [nn.Conv2d(in_filters, out_filters, 3, 2, 1), nn.LeakyReLU(0.2, inplace=True), nn.Dropout2d(0.25)]
+            block = [nn.Conv2d(in_filters, out_filters, 3, 2, 1), nn.ReLU(inplace=True), nn.Dropout2d(0.25)]
+            if bn:
+                block.append(nn.BatchNorm2d(out_filters, 0.8))
+            return block
+
+        self.conv_blocks = nn.Sequential(
+            *discriminator_block(n_channels, 16, bn=False), # 16 x size//2 x size//2
+            *discriminator_block(16, 32), # 32 x size//4 x size//4
+            *discriminator_block(32, 64), # 64 x size//8 x size//8
+            *discriminator_block(64, 128), # 128 x size//16 x size//16
+            # *discriminator_block(128, 128), # 128 x size//32 x size//32
+        )
+
+        # The height and width of downsampled image
+        ds_size = image_size // 2 ** 4
+        # Output layers
+        self.adv_layer = nn.Sequential(nn.Linear(128 * ds_size ** 2, 1), nn.Sigmoid())
+        #self.aux_layer = nn.Sequential(nn.Linear(128 * ds_size ** 2, n_conditions), nn.Sigmoid())
+        self.aux_layer = nn.Sequential(nn.Linear(128 * ds_size ** 2, n_conditions))
+
+    def forward(self, img):
+        out = self.conv_blocks(img)
+        out = out.view(-1, 128*2*2)
+        label = self.aux_layer(out)
+
+        return label
+
+class Gan(nn.Module):
+    def __init__(self, n_noise=4, n_conditions=1, n_channels=1, image_size=32):
+        super(Gan, self).__init__()
+
+        self.gen = Generator(n_noise=n_noise, n_conditions=n_conditions, n_channels=n_channels, image_size=image_size)
+        self.dis = Discriminator(n_conditions=n_conditions, n_channels=n_channels, image_size=image_size)
+
+    def forward(self, x):
+        img = self.gen(x)
+        label = self.dis(img)
+        return label
+
+class DDPG(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(2, 400)
+        self.fc2 = nn.Linear(400, 300)
+        self.fc3 = nn.Linear(300, 1)
+    
+    def forward(self, d, v):
+        # the d and v are normalized to [0, 1]
+        x = torch.cat((d, v), dim=1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        x = 0.5*x + 0.5
+        x = -1. * F.relu(1+ (-1 *F.relu(x)))+1
+        #x = torch.clamp(x, 0, 1)
+        return x
+
+class Dynamics(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(3, 2)
+    
+    def forward(self, d, v, u):
+        # the d and v are normalized to [0, 1]
+        x = torch.cat((u, d, v), dim=1)
+        x = self.fc1(x)
+        return x
+
+class SingleStep(nn.Module):
+    def __init__(self, d_normalizer=60.0, v_normalizer=30.0, index=0) -> None:
+        super().__init__()
+        self.gan = Gan()
+        self.ddpg = DDPG()
+        self.dynamics = Dynamics()
+        self.d_normalizer = d_normalizer
+        self.v_normalizer = v_normalizer
+        #self.denomalizer = torch.tensor([[d_normalizer, 0],
+        #                                  [0, v_normalizer]], dtype=torch.float32)
+        self.normalizer = [d_normalizer, v_normalizer]
+        self.index = index
+    
+    def forward(self, x):
+        d = x[:, 0:1]/self.d_normalizer
+        v = x[:, 1:2]/self.v_normalizer
+        z = x[:, 2:6]
+        x = torch.cat((d, z), dim=1)
+        d_predicted = self.gan(x)
+        u = self.ddpg(d_predicted, v)
+        x = self.dynamics(d, v, u)[:,self.index:self.index+1] * self.normalizer[self.index]
+        #x[:, 0:1] = x[:, 0:1] * self.d_normalizer
+        #x[:, 1:2] = x[:, 1:2] * self.v_normalizer
+        return x
+
+class MultiStep(nn.Module):
+    def __init__(self, d_normalizer=60.0, v_normalizer=30.0, index=0, num_steps=1) -> None:
+        super().__init__()
+        self.gan = Gan()
+        self.ddpg = DDPG()
+        self.dynamics = Dynamics()
+        self.d_normalizer = d_normalizer
+        self.v_normalizer = v_normalizer
+        #self.denomalizer = torch.tensor([[d_normalizer, 0],
+        #                                  [0, v_normalizer]], dtype=torch.float32)
+        self.normalizer = [d_normalizer, v_normalizer]
+        self.index = index
+        self.num_steps = num_steps
+    
+    def forward(self, x):
+        d = x[:, 0:1]/self.d_normalizer
+        v = x[:, 1:2]/self.v_normalizer
+
+        for step in range(self.num_steps):
+            z = x[:, 2+step*4:6+step*4]
+            gan_input = torch.cat((d, z), dim=1)
+            d_predicted = self.gan(gan_input)
+            u = self.ddpg(d_predicted, v)
+            dynamics_output = self.dynamics(d, v, u)
+            d = dynamics_output[:,0:1]
+            v = dynamics_output[:,1:2]
+        x = dynamics_output[:,self.index:self.index+1] * self.normalizer[self.index]
+            
+        #z = x[:, 2:6]
+        #x = torch.cat((d, z), dim=1)
+        #d_predicted = self.gan(x)
+        #u = self.ddpg(d_predicted, v)
+        #x = self.dynamics(d, v, u)[:,self.index:self.index+1] * self.normalizer[self.index]
+        #x[:, 0:1] = x[:, 0:1] * self.d_normalizer
+        #x[:, 1:2] = x[:, 1:2] * self.v_normalizer
+        return x

@@ -564,6 +564,7 @@ def main():
         logger.summarize_results(verified_status, new_idx)
 
     logger.finish()
+    return verified_status
 
 
 if __name__ == '__main__':
