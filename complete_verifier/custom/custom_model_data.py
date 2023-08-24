@@ -300,7 +300,7 @@ class MultiStep(nn.Module):
             u = self.ddpg(d_predicted, v)
             dynamics_output = self.dynamics(d, v, u)
             d = dynamics_output[:,0:1]
-            v = dynamics_output[:,1:2]
+            v = torch.relu(dynamics_output[:,1:2])
         x = dynamics_output[:,self.index:self.index+1] * self.normalizer[self.index]
             
         #z = x[:, 2:6]
