@@ -311,3 +311,60 @@ class MultiStep(nn.Module):
         #x[:, 0:1] = x[:, 0:1] * self.d_normalizer
         #x[:, 1:2] = x[:, 1:2] * self.v_normalizer
         return x
+
+class MultiStepTaxiNet(nn.Module):
+    def __init__(self, index=0, num_steps=1, p_normalizer=6.366468343804353, theta_normalizer=17.248858791583547) -> None:
+        super().__init__()
+        self.main = nn.Sequential(
+            nn.Linear(4, 256),
+            nn.ReLU(),
+
+            nn.Linear(256, 256),
+            nn.ReLU(),
+
+            nn.Linear(256, 256),
+            nn.ReLU(),
+
+            nn.Linear(256, 256),
+            nn.ReLU(),
+
+            nn.Linear(256, 16),
+            nn.ReLU(),
+
+            nn.Linear(16, 8),
+            nn.ReLU(),
+
+            nn.Linear(8, 8),
+            nn.ReLU(),
+
+            nn.Linear(8, 2),
+
+            nn.Linear(2, 1, bias=False)
+        )
+        
+        self.normalizer = [p_normalizer, theta_normalizer]
+        self.index = index
+        self.num_steps = num_steps
+    
+    def dynamics(self, p, theta, u):
+
+        for i in range(20):
+            p = p + 5*0.05*torch.sin(theta*torch.pi/180.)
+            theta = theta + 0.05*180.*(torch.tan(u*torch.pi/180.))/torch.pi
+        return torch.cat((p, theta), dim=1)
+    
+    def forward(self, x):
+        p = x[:, 0:1]
+        theta = x[:, 1:2]
+
+        for step in range(self.num_steps):
+            z = x[:, 2+step*2:4+step*2]
+            input = torch.cat((z, p/self.normalizer[0], theta/self.normalizer[1]), dim=1)
+            u = self.main(input)
+            dynamics_output = self.dynamics(p, theta, u)
+            p = dynamics_output[:,0:1]
+            theta = dynamics_output[:,1:2]
+
+        x = dynamics_output[:,self.index:self.index+1]
+
+        return x
