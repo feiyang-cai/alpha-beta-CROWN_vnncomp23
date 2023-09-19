@@ -26,6 +26,7 @@ from torchvision import transforms
 from torchvision import datasets
 import arguments
 import torch.nn.functional as F
+from torch.nn.utils import spectral_norm
 
 
 def simple_conv_model(in_channel, out_dim):
@@ -279,6 +280,260 @@ class MultiStep(nn.Module):
     def __init__(self, d_normalizer=60.0, v_normalizer=30.0, index=0, num_steps=1) -> None:
         super().__init__()
         self.gan = Gan()
+        self.ddpg = DDPG()
+        self.dynamics = Dynamics()
+        self.d_normalizer = d_normalizer
+        self.v_normalizer = v_normalizer
+        #self.denomalizer = torch.tensor([[d_normalizer, 0],
+        #                                  [0, v_normalizer]], dtype=torch.float32)
+        self.normalizer = [d_normalizer, v_normalizer]
+        self.index = index
+        self.num_steps = num_steps
+    
+    def forward(self, x):
+        d = x[:, 0:1]/self.d_normalizer
+        v = x[:, 1:2]/self.v_normalizer
+
+        for step in range(self.num_steps):
+            z = x[:, 2+step*4:6+step*4]
+            gan_input = torch.cat((d, z), dim=1)
+            d_predicted = self.gan(gan_input)
+            u = self.ddpg(d_predicted, v)
+            dynamics_output = self.dynamics(d, v, u)
+            d = dynamics_output[:,0:1]
+            v = torch.relu(dynamics_output[:,1:2])
+        x = dynamics_output[:,self.index:self.index+1] * self.normalizer[self.index]
+            
+        #z = x[:, 2:6]
+        #x = torch.cat((d, z), dim=1)
+        #d_predicted = self.gan(x)
+        #u = self.ddpg(d_predicted, v)
+        #x = self.dynamics(d, v, u)[:,self.index:self.index+1] * self.normalizer[self.index]
+        #x[:, 0:1] = x[:, 0:1] * self.d_normalizer
+        #x[:, 1:2] = x[:, 1:2] * self.v_normalizer
+        return x
+
+def snconv2d(in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True):
+    return spectral_norm(nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
+                                   stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias))
+
+def snlinear(in_features, out_features):
+    return spectral_norm(nn.Linear(in_features=in_features, out_features=out_features))
+
+class Self_Attn(nn.Module):
+    """ Self attention Layer"""
+
+    def __init__(self, in_channels):
+        super(Self_Attn, self).__init__()
+        self.in_channels = in_channels
+        self.snconv1x1_theta = snconv2d(in_channels=in_channels, out_channels=in_channels//8, kernel_size=1, stride=1, padding=0)
+        self.snconv1x1_phi = snconv2d(in_channels=in_channels, out_channels=in_channels//8, kernel_size=1, stride=1, padding=0)
+        self.snconv1x1_g = snconv2d(in_channels=in_channels, out_channels=in_channels//2, kernel_size=1, stride=1, padding=0)
+        self.snconv1x1_attn = snconv2d(in_channels=in_channels//2, out_channels=in_channels, kernel_size=1, stride=1, padding=0)
+        self.maxpool = nn.MaxPool2d(2, stride=2, padding=0)
+        self.softmax  = nn.Softmax(dim=-1)
+        self.sigma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        """
+            inputs :
+                x : input feature maps(B X C X W X H)
+            returns :
+                out : self attention value + input feature 
+                attention: B X N X N (N is Width*Height)
+        """
+        _, ch, h, w = x.size()
+        # Theta path
+        theta = self.snconv1x1_theta(x)
+        theta = theta.view(-1, ch//8, h*w)
+        # Phi path
+        phi = self.snconv1x1_phi(x)
+        phi = self.maxpool(phi)
+        phi = phi.view(-1, ch//8, h*w//4)
+        # Attn map
+        attn = torch.bmm(theta.permute(0, 2, 1), phi)
+        attn = self.softmax(attn)
+        # g path
+        g = self.snconv1x1_g(x)
+        g = self.maxpool(g)
+        g = g.view(-1, ch//2, h*w//4)
+        # Attn_g
+        attn_g = torch.bmm(g, attn.permute(0, 2, 1))
+        attn_g = attn_g.view(-1, ch//2, h, w)
+        attn_g = self.snconv1x1_attn(attn_g)
+        # Out
+        out = x + self.sigma*attn_g
+        return out
+
+class GenBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(GenBlock, self).__init__()
+        self.cond_bn1 = nn.BatchNorm2d(in_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.snconv2d1 = snconv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
+        self.cond_bn2 = nn.BatchNorm2d(out_channels)
+        self.snconv2d2 = snconv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
+        self.snconv2d0 = snconv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x):
+        x0 = x
+
+        x = self.cond_bn1(x)
+        x = self.relu(x)
+        x = F.interpolate(x, scale_factor=2, mode='nearest') # upsample
+        x = self.snconv2d1(x)
+        #x = self.cond_bn2(x)
+        #x = self.relu(x)
+        #x = self.snconv2d2(x)
+
+        x0 = F.interpolate(x0, scale_factor=2, mode='nearest') # upsample
+        x0 = self.snconv2d0(x0)
+
+        out = x + x0
+        return out
+
+class cGAN_concat_SAGAN_Generator(nn.Module):
+    """Generator."""
+
+    def __init__(self, z_dim, dim_c=1, g_conv_dim=64):
+        super(cGAN_concat_SAGAN_Generator, self).__init__()
+
+        self.z_dim = z_dim
+        self.dim_c = dim_c
+        self.g_conv_dim = g_conv_dim
+        self.snlinear0 = snlinear(in_features=z_dim+dim_c, out_features=g_conv_dim*16*1*1)
+        self.block1 = GenBlock(g_conv_dim*16, g_conv_dim*16)
+        self.block2 = GenBlock(g_conv_dim*16, g_conv_dim*8)
+        self.block3 = GenBlock(g_conv_dim*8, g_conv_dim*4)
+        self.self_attn = Self_Attn(g_conv_dim*4)
+        self.block4 = GenBlock(g_conv_dim*4, g_conv_dim*2)
+        self.block5 = GenBlock(g_conv_dim*2, g_conv_dim)
+        self.bn = nn.BatchNorm2d(g_conv_dim, eps=1e-5, momentum=0.0001, affine=True)
+        self.relu = nn.ReLU(inplace=True)
+        self.snconv2d1 = snconv2d(in_channels=g_conv_dim, out_channels=3, kernel_size=3, stride=1, padding=1)
+        self.tanh = nn.Tanh()
+
+    def forward(self, x):
+        # n x z_dim
+        # x, labels, z
+        act0 = self.snlinear0(x)            # n x g_conv_dim*16*1*1
+        act0 = act0.view(-1, self.g_conv_dim*16, 1, 1) # n x g_conv_dim*16 x 1 x 1
+        act1 = self.block1(act0)    # n x g_conv_dim*16 x 2 x 2
+        act2 = self.block2(act1)    # n x g_conv_dim*8 x 4 x 4
+        act3 = self.block3(act2)    # n x g_conv_dim*4 x 8 x 8
+        act3 = self.self_attn(act3)         # n x g_conv_dim*4 x 8 x 8
+        act4 = self.block4(act3)    # n x g_conv_dim*2 x 16 x 16
+        act5 = self.block5(act4)    # n x g_conv_dim  x 32 x 32
+        act5 = self.bn(act5)                # n x g_conv_dim  x 32 x 32
+        act5 = self.relu(act5)              # n x g_conv_dim  x 32 x 32
+        act6 = self.snconv2d1(act5)         # n x 3 x 32 x 32
+        act6 = self.tanh(act6)              # n x 3 x 32 x 32
+        return act6
+
+class DiscOptBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DiscOptBlock, self).__init__()
+        self.snconv2d1 = snconv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+        self.snconv2d2 = snconv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
+        self.downsample = nn.AvgPool2d(2)
+        self.snconv2d0 = snconv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x):
+        x0 = x
+
+        x = self.snconv2d1(x)
+        x = self.relu(x)
+        #x = self.snconv2d2(x)
+        x = self.downsample(x)
+
+        x0 = self.downsample(x0)
+        x0 = self.snconv2d0(x0)
+
+        out = x + x0
+        return out
+
+class DiscBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DiscBlock, self).__init__()
+        self.relu = nn.ReLU(inplace=True)
+        self.snconv2d1 = snconv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
+        self.snconv2d2 = snconv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
+        self.downsample = nn.AvgPool2d(2)
+        self.ch_mismatch = False
+        if in_channels != out_channels:
+            self.ch_mismatch = True
+        self.snconv2d0 = snconv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x, downsample=True):
+        x0 = x
+
+        x = self.relu(x)
+        x = self.snconv2d1(x)
+        #x = self.relu(x)
+        #x = self.snconv2d2(x)
+        if downsample:
+            x = self.downsample(x)
+
+        if downsample or self.ch_mismatch:
+            x0 = self.snconv2d0(x0)
+            if downsample:
+                x0 = self.downsample(x0)
+        out = x + x0
+        return out
+
+
+class cGAN_concat_SAGAN_Discriminator(nn.Module):
+    """Discriminator."""
+
+    def __init__(self, d_conv_dim=64):
+        super(cGAN_concat_SAGAN_Discriminator, self).__init__()
+        self.d_conv_dim = d_conv_dim
+        self.opt_block1 = DiscOptBlock(3, d_conv_dim)
+        self.block1 = DiscBlock(d_conv_dim, d_conv_dim*2)
+        self.self_attn = Self_Attn(d_conv_dim*2)
+        self.block2 = DiscBlock(d_conv_dim*2, d_conv_dim*4)
+        self.block3 = DiscBlock(d_conv_dim*4, d_conv_dim*8)
+        self.block4 = DiscBlock(d_conv_dim*8, d_conv_dim*16)
+        self.block5 = DiscBlock(d_conv_dim*16, d_conv_dim*16)
+        self.relu = nn.ReLU(inplace=True)
+        self.snlinear1 = snlinear(in_features=d_conv_dim*16*1*1, out_features=1)
+        self.snlinear2 = snlinear(in_features=d_conv_dim*16*1*1, out_features=1)
+
+    def forward(self, x):
+        # n x 3 x 128 x 128
+        h0 = self.opt_block1(x) # n x d_conv_dim   x 16 x 16
+        h1 = self.block1(h0)    # n x d_conv_dim*2 x 8 x 8
+        h1 = self.self_attn(h1) # n x d_conv_dim*2 x 8 x 8
+        h2 = self.block2(h1)    # n x d_conv_dim*4 x 4 x 4
+        h3 = self.block3(h2)    # n x d_conv_dim*8 x  2 x  2
+        h4 = self.block4(h3)    # n x d_conv_dim*16 x 1 x  1
+        h5 = self.block5(h4, downsample=False)  # n x d_conv_dim*16 x 1 x 1
+        out = self.relu(h5)              # n x d_conv_dim*16 x 1 x 1
+        # out = torch.sum(out, dim=[2,3])   # n x d_conv_dim*16
+        out = out.view(-1,self.d_conv_dim*16*1*1)
+        #output = self.snlinear1(out)
+        output_1 = torch.sigmoid(self.snlinear2(out)) # n
+
+        return output_1
+
+
+class GanViT(nn.Module):
+    def __init__(self):
+        super(GanViT, self).__init__()
+
+        self.gen = cGAN_concat_SAGAN_Generator(z_dim=4, dim_c=1)
+        self.dis = cGAN_concat_SAGAN_Discriminator()
+
+    def forward(self, x):
+        img = self.gen(x)
+        label = self.dis(img)
+        return label
+
+class MultiStepViT(nn.Module):
+    def __init__(self, d_normalizer=60.0, v_normalizer=30.0, index=0, num_steps=1) -> None:
+        super().__init__()
+        self.gan = GanViT()
         self.ddpg = DDPG()
         self.dynamics = Dynamics()
         self.d_normalizer = d_normalizer
