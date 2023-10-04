@@ -382,9 +382,9 @@ class GenBlock(nn.Module):
         x = self.relu(x)
         x = F.interpolate(x, scale_factor=2, mode='nearest') # upsample
         x = self.snconv2d1(x)
-        #x = self.cond_bn2(x)
-        #x = self.relu(x)
-        #x = self.snconv2d2(x)
+        x = self.cond_bn2(x)
+        x = self.relu(x)
+        x = self.snconv2d2(x)
 
         x0 = F.interpolate(x0, scale_factor=2, mode='nearest') # upsample
         x0 = self.snconv2d0(x0)
@@ -395,36 +395,36 @@ class GenBlock(nn.Module):
 class cGAN_concat_SAGAN_Generator(nn.Module):
     """Generator."""
 
-    def __init__(self, z_dim, dim_c=1, g_conv_dim=64):
+    def __init__(self, z_dim, dim_c=1, g_conv_dim=16):
         super(cGAN_concat_SAGAN_Generator, self).__init__()
 
         self.z_dim = z_dim
         self.dim_c = dim_c
         self.g_conv_dim = g_conv_dim
-        self.snlinear0 = snlinear(in_features=z_dim+dim_c, out_features=g_conv_dim*16*1*1)
+        self.snlinear0 = snlinear(in_features=z_dim+dim_c, out_features=g_conv_dim*16*4*4)
         self.block1 = GenBlock(g_conv_dim*16, g_conv_dim*16)
-        self.block2 = GenBlock(g_conv_dim*16, g_conv_dim*8)
-        self.block3 = GenBlock(g_conv_dim*8, g_conv_dim*4)
-        self.self_attn = Self_Attn(g_conv_dim*4)
-        self.block4 = GenBlock(g_conv_dim*4, g_conv_dim*2)
-        self.block5 = GenBlock(g_conv_dim*2, g_conv_dim)
-        self.bn = nn.BatchNorm2d(g_conv_dim, eps=1e-5, momentum=0.0001, affine=True)
+        self.self_attn = Self_Attn(g_conv_dim*16)
+        self.block2 = GenBlock(g_conv_dim*16, g_conv_dim*16)
+        self.block3 = GenBlock(g_conv_dim*16, g_conv_dim*16)
+        #self.block4 = GenBlock(g_conv_dim*4, g_conv_dim*2)
+        #self.block5 = GenBlock(g_conv_dim*2, g_conv_dim)
+        self.bn = nn.BatchNorm2d(g_conv_dim*16, eps=1e-5, momentum=0.0001, affine=True)
         self.relu = nn.ReLU(inplace=True)
-        self.snconv2d1 = snconv2d(in_channels=g_conv_dim, out_channels=3, kernel_size=3, stride=1, padding=1)
+        self.snconv2d1 = snconv2d(in_channels=g_conv_dim*16, out_channels=3, kernel_size=3, stride=1, padding=1)
         self.tanh = nn.Tanh()
 
     def forward(self, x):
         # n x z_dim
         # x, labels, z
         act0 = self.snlinear0(x)            # n x g_conv_dim*16*1*1
-        act0 = act0.view(-1, self.g_conv_dim*16, 1, 1) # n x g_conv_dim*16 x 1 x 1
+        act0 = act0.view(-1, self.g_conv_dim*16, 4, 4) # n x g_conv_dim*16 x 1 x 1
         act1 = self.block1(act0)    # n x g_conv_dim*16 x 2 x 2
         act2 = self.block2(act1)    # n x g_conv_dim*8 x 4 x 4
+        act2 = self.self_attn(act2)         # n x g_conv_dim*4 x 8 x 8
         act3 = self.block3(act2)    # n x g_conv_dim*4 x 8 x 8
-        act3 = self.self_attn(act3)         # n x g_conv_dim*4 x 8 x 8
-        act4 = self.block4(act3)    # n x g_conv_dim*2 x 16 x 16
-        act5 = self.block5(act4)    # n x g_conv_dim  x 32 x 32
-        act5 = self.bn(act5)                # n x g_conv_dim  x 32 x 32
+        #act4 = self.block4(act3)    # n x g_conv_dim*2 x 16 x 16
+        #act5 = self.block5(act4)    # n x g_conv_dim  x 32 x 32
+        act5 = self.bn(act3)                # n x g_conv_dim  x 32 x 32
         act5 = self.relu(act5)              # n x g_conv_dim  x 32 x 32
         act6 = self.snconv2d1(act5)         # n x 3 x 32 x 32
         act6 = self.tanh(act6)              # n x 3 x 32 x 32
@@ -456,7 +456,7 @@ class DiscOptBlock(nn.Module):
 class DiscBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(DiscBlock, self).__init__()
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU()
         self.snconv2d1 = snconv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
         self.snconv2d2 = snconv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
         self.downsample = nn.AvgPool2d(2)
@@ -470,8 +470,8 @@ class DiscBlock(nn.Module):
 
         x = self.relu(x)
         x = self.snconv2d1(x)
-        #x = self.relu(x)
-        #x = self.snconv2d2(x)
+        x = self.relu(x)
+        x = self.snconv2d2(x)
         if downsample:
             x = self.downsample(x)
 
@@ -482,41 +482,40 @@ class DiscBlock(nn.Module):
         out = x + x0
         return out
 
-
 class cGAN_concat_SAGAN_Discriminator(nn.Module):
     """Discriminator."""
 
-    def __init__(self, d_conv_dim=64):
+    def __init__(self, d_conv_dim=16):
         super(cGAN_concat_SAGAN_Discriminator, self).__init__()
         self.d_conv_dim = d_conv_dim
-        self.opt_block1 = DiscOptBlock(3, d_conv_dim)
-        self.block1 = DiscBlock(d_conv_dim, d_conv_dim*2)
-        self.self_attn = Self_Attn(d_conv_dim*2)
-        self.block2 = DiscBlock(d_conv_dim*2, d_conv_dim*4)
-        self.block3 = DiscBlock(d_conv_dim*4, d_conv_dim*8)
+        #self.opt_block1 = DiscOptBlock(3, d_conv_dim)
+        self.block1 = DiscBlock(3, d_conv_dim*8)
+        self.self_attn = Self_Attn(d_conv_dim*8)
+        self.block2 = DiscBlock(d_conv_dim*8, d_conv_dim*8)
+        self.block3 = DiscBlock(d_conv_dim*8, d_conv_dim*8)
         self.block4 = DiscBlock(d_conv_dim*8, d_conv_dim*16)
-        self.block5 = DiscBlock(d_conv_dim*16, d_conv_dim*16)
+        #self.block5 = DiscBlock(d_conv_dim*16, d_conv_dim*16)
         self.relu = nn.ReLU(inplace=True)
-        self.snlinear1 = snlinear(in_features=d_conv_dim*16*1*1, out_features=1)
-        self.snlinear2 = snlinear(in_features=d_conv_dim*16*1*1, out_features=1)
+        self.snlinear1 = snlinear(in_features=d_conv_dim*16*8*8, out_features=1)
+        self.snlinear2 = snlinear(in_features=d_conv_dim*16*8*8, out_features=1)
 
     def forward(self, x):
         # n x 3 x 128 x 128
-        h0 = self.opt_block1(x) # n x d_conv_dim   x 16 x 16
-        h1 = self.block1(h0)    # n x d_conv_dim*2 x 8 x 8
+        #h0 = self.opt_block1(x) # n x d_conv_dim   x 16 x 16
+        h1 = self.block1(x)    # n x d_conv_dim*2 x 8 x 8
         h1 = self.self_attn(h1) # n x d_conv_dim*2 x 8 x 8
         h2 = self.block2(h1)    # n x d_conv_dim*4 x 4 x 4
-        h3 = self.block3(h2)    # n x d_conv_dim*8 x  2 x  2
-        h4 = self.block4(h3)    # n x d_conv_dim*16 x 1 x  1
-        h5 = self.block5(h4, downsample=False)  # n x d_conv_dim*16 x 1 x 1
-        out = self.relu(h5)              # n x d_conv_dim*16 x 1 x 1
+        h3 = self.block3(h2, False)    # n x d_conv_dim*8 x  2 x  2
+        h4 = self.block4(h3, False)    # n x d_conv_dim*16 x 1 x  1
+        #print(h4.shape)
+        #h5 = self.block5(h4, downsample=False)  # n x d_conv_dim*16 x 1 x 1
+        out = self.relu(h4)              # n x d_conv_dim*16 x 1 x 1
         # out = torch.sum(out, dim=[2,3])   # n x d_conv_dim*16
-        out = out.view(-1,self.d_conv_dim*16*1*1)
-        #output = self.snlinear1(out)
+        out = out.view(-1,self.d_conv_dim*16*8*8)
+        #output = torch.squeeze(self.snlinear1(out))
         output_1 = torch.sigmoid(self.snlinear2(out)) # n
 
         return output_1
-
 
 class GanViT(nn.Module):
     def __init__(self):
