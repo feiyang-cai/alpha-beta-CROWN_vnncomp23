@@ -430,29 +430,6 @@ class cGAN_concat_SAGAN_Generator(nn.Module):
         act6 = self.tanh(act6)              # n x 3 x 32 x 32
         return act6
 
-class DiscOptBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(DiscOptBlock, self).__init__()
-        self.snconv2d1 = snconv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
-        self.relu = nn.ReLU(inplace=True)
-        self.snconv2d2 = snconv2d(in_channels=out_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1)
-        self.downsample = nn.AvgPool2d(2)
-        self.snconv2d0 = snconv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=1, padding=0)
-
-    def forward(self, x):
-        x0 = x
-
-        x = self.snconv2d1(x)
-        x = self.relu(x)
-        #x = self.snconv2d2(x)
-        x = self.downsample(x)
-
-        x0 = self.downsample(x0)
-        x0 = self.snconv2d0(x0)
-
-        out = x + x0
-        return out
-
 class DiscBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(DiscBlock, self).__init__()
@@ -488,20 +465,17 @@ class cGAN_concat_SAGAN_Discriminator(nn.Module):
     def __init__(self, d_conv_dim=16):
         super(cGAN_concat_SAGAN_Discriminator, self).__init__()
         self.d_conv_dim = d_conv_dim
-        #self.opt_block1 = DiscOptBlock(3, d_conv_dim)
         self.block1 = DiscBlock(3, d_conv_dim*8)
         self.self_attn = Self_Attn(d_conv_dim*8)
         self.block2 = DiscBlock(d_conv_dim*8, d_conv_dim*8)
         self.block3 = DiscBlock(d_conv_dim*8, d_conv_dim*8)
         self.block4 = DiscBlock(d_conv_dim*8, d_conv_dim*16)
-        #self.block5 = DiscBlock(d_conv_dim*16, d_conv_dim*16)
         self.relu = nn.ReLU(inplace=True)
         self.snlinear1 = snlinear(in_features=d_conv_dim*16*8*8, out_features=1)
         self.snlinear2 = snlinear(in_features=d_conv_dim*16*8*8, out_features=1)
 
     def forward(self, x):
         # n x 3 x 128 x 128
-        #h0 = self.opt_block1(x) # n x d_conv_dim   x 16 x 16
         h1 = self.block1(x)    # n x d_conv_dim*2 x 8 x 8
         h1 = self.self_attn(h1) # n x d_conv_dim*2 x 8 x 8
         h2 = self.block2(h1)    # n x d_conv_dim*4 x 4 x 4
