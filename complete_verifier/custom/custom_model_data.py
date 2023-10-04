@@ -516,20 +516,26 @@ class MultiStepViT(nn.Module):
         self.normalizer = [d_normalizer, v_normalizer]
         self.index = index
         self.num_steps = num_steps
+
     
     def forward(self, x):
         d = x[:, 0:1]/self.d_normalizer
         v = x[:, 1:2]/self.v_normalizer
 
-        for step in range(self.num_steps):
-            z = x[:, 2+step*4:6+step*4]
-            gan_input = torch.cat((d, z), dim=1)
-            d_predicted = self.gan(gan_input)
-            u = self.ddpg(d_predicted, v)
-            dynamics_output = self.dynamics(d, v, u)
-            d = dynamics_output[:,0:1]
-            v = torch.relu(dynamics_output[:,1:2])
-        x = dynamics_output[:,self.index:self.index+1] * self.normalizer[self.index]
+        if self.index == 0 and self.num_steps==1:
+            ratio = self.dynamics.fc1.weight.data[0, 2]
+            x = d + ratio * v
+
+        else:
+            for step in range(self.num_steps):
+                z = x[:, 2+step*4:6+step*4]
+                gan_input = torch.cat((d, z), dim=1)
+                d_predicted = self.gan(gan_input)
+                u = self.ddpg(d_predicted, v)
+                dynamics_output = self.dynamics(d, v, u)
+                d = dynamics_output[:,0:1]
+                v = torch.relu(dynamics_output[:,1:2])
+            x = dynamics_output[:,self.index:self.index+1] * self.normalizer[self.index]
             
         #z = x[:, 2:6]
         #x = torch.cat((d, z), dim=1)
